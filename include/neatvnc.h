@@ -513,6 +513,15 @@ struct nvnc_buffer* nvnc_buffer_pool_acquire(struct nvnc_buffer_pool*);
  * to interpret the buffer, such as, but not limited to: width, height, stride
  * and format.
  *
+ * The stride is counted in PIXELS, not bytes. This applies to every function
+ * here that takes a stride. The allocation is sized as
+ * height * stride * bytes_per_pixel, and consumers index rows by it directly:
+ * see compositor.c, which multiplies stride by the pixel size, and cursor.c,
+ * which advances a uint32_t pointer by it. For a tightly packed frame the
+ * stride is therefore simply the width; passing a byte stride overallocates
+ * and makes every consumer step four times too far per row on a 32-bit
+ * format, reading past the pixels that were written.
+ *
  * An nvnc_buffer object will be allocated internally by this function with a
  * type of NVNC_BUFFER_SIMPLE. See nvnc_buffer_new();
  */
@@ -521,6 +530,8 @@ struct nvnc_frame* nvnc_frame_new(uint16_t width, uint16_t height,
 
 /**
  * Create a frame backed by an existing buffer object.
+ *
+ * The stride is counted in pixels; see nvnc_frame_new().
  *
  * This function increases the reference count of the buffer object, so
  * remember to call nvnc_buffer_unref() afterwards.
@@ -531,6 +542,8 @@ struct nvnc_frame* nvnc_frame_from_buffer(struct nvnc_buffer* buffer,
 
 /**
  * Create a frame from a raw memory address.
+ *
+ * The stride is counted in pixels; see nvnc_frame_new().
  *
  * This function calls nvnc_buffer_from_addr() internally.
  */
