@@ -284,10 +284,23 @@ def run_quiet_boundary(port, encoding, secs, gap=0.25):
     bytes and update counts but never damaged-pixel figures, because those
     genuinely require decoding the rectangles.
     """
+    if USE_FENCE:
+        # This mode reads undifferentiated bytes off the socket and never
+        # parses messages, so it cannot see a fence request, let alone
+        # answer one. Advertising fence anyway would leave the server's
+        # in-flight byte count growing forever until it throttled itself to
+        # a standstill -- a stall entirely of the harness's own making, and
+        # one that looks exactly like a server bug. Refuse rather than
+        # report a number that means nothing.
+        raise RuntimeError(
+            "%s cannot be measured with fences: this encoding needs the "
+            "quiet-boundary mode, which does not parse messages and so "
+            "cannot answer a fence request. Use --encoding raw to measure "
+            "with congestion control, or --no-fence to measure this "
+            "encoding without it." % encoding)
     c = RFB(port)
     try:
-        c.set_encodings([encoding, "copyrect", "cursor"] +
-                        (["fence"] if USE_FENCE else []))
+        c.set_encodings([encoding, "copyrect", "cursor"])
         time.sleep(0.5)
         c.request(incremental=False)
         c.s.settimeout(gap)
