@@ -8,6 +8,39 @@ workload revisions.
 
     bench/vncbench.py --ab --workload scroll --encoding <enc> --secs 6 --repeat 2
 
+## What this harness can and cannot measure
+
+It runs on the same machine as the servers and talks to them over loopback,
+and its client is Python. Both matter:
+
+  * **Loopback has no bandwidth limit worth finding.** The estimator
+    correctly saturates here. Nothing this harness reports says anything
+    about how the congestion controller behaves on a real link.
+  * **The client is slower than the link.** A round trip is dominated by
+    Python parsing the rectangles, not by bytes on the wire, so measured
+    round-trip time is a property of the harness.
+
+So congestion control has to be judged against a real viewer over the real
+link. What the harness is good for is encoder bytes, and for catching
+outright faults in the code path -- which it did: a zero estimate pinning
+the server in permanent slow start, and a bandwidth figure overflowing the
+int it was returned in. Both showed up here as an obvious 0.4 fps and would
+have been invisible in casual use.
+
+## Congestion control, loopback A/B
+
+Single client, server restarted before each run.
+
+| build | fps | drops | estimate |
+|---|---|---|---|
+| before any bandwidth work | 7.8, 6.6 | 11, 12 | median ~5 MB/s |
+| after | 8.1, 8.1, 7.2 | 0, 0, 0 | saturating |
+
+The throughput difference is small and partly noise, which is expected:
+loopback was never bandwidth-limited, so a better-behaved limiter has
+little room to help. The drops going to zero is the real result, along with
+an estimate that no longer collapses to zero.
+
 ## What fences cost
 
 Measured with `--encoding raw`, the only mode that parses messages exactly
