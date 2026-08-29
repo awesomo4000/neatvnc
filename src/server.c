@@ -782,6 +782,10 @@ static void nvnc_send_end_of_continuous_updates(struct nvnc_client* client)
 
 	msg.type = RFB_SERVER_TO_CLIENT_END_OF_CONTINUOUS_UPDATES;
 
+	nvnc_log(NVNC_LOG_DEBUG,
+			"Sending EndOfContinuousUpdates to client %p -- this is what tells it the server supports the extension",
+			client);
+
 	stream_write(client->net_stream, &msg, sizeof(msg));
 }
 
@@ -1797,6 +1801,10 @@ static int on_client_enable_continuous_updates(struct nvnc_client* client)
 
 	if (client->buffer_len - client->buffer_index < sizeof(*msg))
 		return 0;
+
+	nvnc_log(NVNC_LOG_DEBUG,
+			"Client %p %s continuous updates", client,
+			msg->enable_flag ? "ENABLED" : "disabled");
 
 	client->continuous_updates_enabled = msg->enable_flag;
 
