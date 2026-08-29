@@ -1202,8 +1202,12 @@ static void process_fb_update_requests(struct nvnc_client* client)
 		// A max_inflight of zero means one frame at a time, which is the
 		// usual slow-start rule: send one, wait for the acknowledgement,
 		// and by then there is a real estimate to size the window with.
-		int max_inflight = bandwidth == 0 ? 0 : round(bandwidth *
-				(max_delay + client->min_rtt * 1e-6));
+		double window = bandwidth == 0 ? 0.0 : (double)bandwidth *
+				(max_delay + client->min_rtt * 1e-6);
+		// Same saturation reasoning as bwe_get_estimate: a saturated
+		// bandwidth multiplied by a long round trip leaves int range.
+		int max_inflight = window >= (double)INT32_MAX
+				? INT32_MAX : (int)round(window);
 
 		// Allow at least one further frame to queue behind the one in
 		// flight. max_delay above is a single frame period at 30fps, so

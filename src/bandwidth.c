@@ -1,5 +1,6 @@
 #include "bandwidth.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <tgmath.h>
 
@@ -145,5 +146,15 @@ void bwe_update_rtt_min(struct bwe* self, int rtt_min)
 
 int bwe_get_estimate(const struct bwe* self)
 {
+	// The estimate is a double and the return type is not. A fast link
+	// measured against a one microsecond delay floor reaches 4e12 B/s,
+	// which does not fit an int, and converting an out-of-range double to
+	// an integer is undefined -- in practice it came back as zero, which
+	// callers read as "no capacity" and is the exact opposite of what the
+	// measurement said. Saturate instead.
+	if (!(self->estimate > 0))
+		return 0;
+	if (self->estimate >= (double)INT_MAX)
+		return INT_MAX;
 	return round(self->estimate);
 }
