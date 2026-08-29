@@ -76,11 +76,16 @@ static double estimate_non_congested_bandwidth(const struct bwe* self)
 		int rtt = s->arrival_time - s->departure_time;
 		int bw_delay = rtt - self->rtt_min;
 
-		// A round trip no slower than the fastest ever seen puts no
-		// measurable time on the wire, so it says nothing about rate.
-		// Skipping it also keeps the division below defined.
-		if (bw_delay <= 0)
-			continue;
+		// A round trip no slower than the fastest ever seen means the
+		// bytes went out faster than the clock can resolve. That is
+		// evidence of a fast link, not a slow one, so it must not be
+		// discarded: dropping these samples leaves the estimate at zero
+		// on a loopback connection, where almost every round trip ties
+		// the minimum, and zero is then read as "no capacity" and pins
+		// the server in permanent slow start. Charge one microsecond
+		// instead, which is the floor the timestamps can express.
+		if (bw_delay < 1)
+			bw_delay = 1;
 
 		double rate = (double)s->bytes / (bw_delay * 1e-6);
 		if (rate > best)
@@ -109,8 +114,8 @@ static double estimate_congested_bandwidth(const struct bwe* self)
 	int rtt = s1->arrival_time - s0->departure_time;
 	int bw_delay = rtt - self->rtt_min;
 
-	if (bw_delay <= 0)
-		return 0;
+	if (bw_delay < 1)
+		bw_delay = 1;
 
 	return (double)bytes_total / (bw_delay * 1e-6);
 }
