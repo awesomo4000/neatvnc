@@ -1185,9 +1185,22 @@ static void process_fb_update_requests(struct nvnc_client* client)
 		return;
 
 	int bandwidth = bwe_get_estimate(client->bwe);
-	if (bandwidth != 0) {
+	{
 		double max_delay = 33.333e-3;
-		int max_inflight = round(bandwidth *
+		// Until the first ping response comes back the estimator has no
+		// samples and reports zero. Treating that as "no limit" lets the
+		// whole startup burst go out at once: on a slow link the first
+		// full-screen frame has not even been acknowledged before three
+		// more are queued behind it. They are redundant -- the screen has
+		// not changed, the capture buffer pool is still settling and
+		// re-reporting full damage -- but the client must still receive
+		// every byte before it can paint, so the first picture is delayed
+		// by the cost of all four.
+		//
+		// A max_inflight of zero means one frame at a time, which is the
+		// usual slow-start rule: send one, wait for the acknowledgement,
+		// and by then there is a real estimate to size the window with.
+		int max_inflight = bandwidth == 0 ? 0 : round(bandwidth *
 				(max_delay + client->min_rtt * 1e-6));
 
 		// If there is already more data inflight than the link can
