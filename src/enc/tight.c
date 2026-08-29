@@ -822,6 +822,15 @@ static int tight_encoder_encode(struct encoder* encoder,
 	struct tight_encoder* self = tight_encoder(encoder);
 	int rc;
 
+	nvnc_log(NVNC_LOG_DEBUG, "tight encode: quality=%d jpeg_path=%d",
+			self->quality,
+#ifdef HAVE_JPEG
+			self->quality < 10
+#else
+			-1
+#endif
+			);
+
 	nvnc_composite_fb_copy(&self->composite_fb, composite_fb);
 	self->pts = nvnc_composite_fb_pts(composite_fb);
 
