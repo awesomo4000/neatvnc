@@ -1193,7 +1193,10 @@ static void process_fb_update_requests(struct nvnc_client* client)
 		// If there is already more data inflight than the link can
 		// handle, let's not put more load on it:
 		if (client->inflight_bytes > max_inflight) {
-			nvnc_log(NVNC_LOG_DEBUG, "Exceeded bandwidth limit. Dropping frame.");
+			nvnc_log(NVNC_LOG_DEBUG,
+					"Exceeded bandwidth limit. Dropping frame. bw=%d B/s min_rtt=%d us inflight=%d max_inflight=%d",
+					bandwidth, client->min_rtt,
+					client->inflight_bytes, max_inflight);
 			return;
 		}
 	}
@@ -2228,6 +2231,11 @@ static void on_fence_response(struct nvnc_client* client,
 	bwe_feed(client->bwe, &sample);
 
 	client->inflight_bytes -= frame_size;
+
+	nvnc_log(NVNC_LOG_DEBUG,
+			"Ping reply: frame_size=%u rtt=%d us min_rtt=%d inflight now %d bw=%d B/s",
+			frame_size, rtt, client->min_rtt, client->inflight_bytes,
+			bwe_get_estimate(client->bwe));
 
 	nvnc_trace("Bandwidth estimate: %.3f Mb/s\n",
 			bwe_get_estimate(client->bwe) * 8e-6);
