@@ -118,6 +118,9 @@ struct nvnc_client {
 	int32_t min_rtt;
 	struct bwe* bwe;
 	int32_t inflight_bytes;
+	// Size of the most recently sent frame, used as the floor for how much
+	// data may be in flight. See process_fb_update_requests.
+	int32_t last_frame_size;
 	bool has_ext_mouse_buttons;
 	struct aml_idle* close_task;
 	bool needs_desktop_name_update;

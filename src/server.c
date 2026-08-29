@@ -813,6 +813,8 @@ static void send_ping(struct nvnc_client* client, uint32_t prev_frame_size)
 	};
 
 	client->inflight_bytes += prev_frame_size;
+	if (prev_frame_size > 0)
+		client->last_frame_size = prev_frame_size;
 
 	send_fence(client, RFB_FENCE_REQUEST | RFB_FENCE_BLOCK_BEFORE,
 			payload, sizeof(payload));
@@ -1202,6 +1204,19 @@ static void process_fb_update_requests(struct nvnc_client* client)
 		// and by then there is a real estimate to size the window with.
 		int max_inflight = bandwidth == 0 ? 0 : round(bandwidth *
 				(max_delay + client->min_rtt * 1e-6));
+
+		// Allow at least one further frame to queue behind the one in
+		// flight. max_delay above is a single frame period at 30fps, so
+		// whenever a frame takes longer than that to transmit the window
+		// comes out smaller than one frame -- 584kB against a 4MB frame
+		// was measured here -- and every frame after the first is dropped
+		// until the outstanding one is acknowledged. The link then sits
+		// idle for a whole round trip, and most of that round trip is the
+		// client decoding, not bytes on the wire. Letting one frame queue
+		// keeps the pipe busy across the decode without letting a backlog
+		// build: two frames outstanding is the most this permits.
+		if (max_inflight < client->last_frame_size)
+			max_inflight = client->last_frame_size;
 
 		// If there is already more data inflight than the link can
 		// handle, let's not put more load on it:
