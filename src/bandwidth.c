@@ -21,6 +21,13 @@ struct bwe* bwe_create(int rtt_min)
 	if (!self)
 		return NULL;
 
+	// This was silently dropped before, leaving rtt_min at the zero calloc
+	// had written. Honouring it matters now that it is subtracted from
+	// every sample: anything larger than a real round trip drives the
+	// delay negative and the estimate to nonsense, so callers pass zero
+	// and let the first measurement set it.
+	self->rtt_min = rtt_min;
+
 	return self;
 }
 
@@ -37,10 +44,31 @@ static inline const struct bwe_sample* get_sample(const struct bwe* self, int in
 }
 
 // Under non-congested circumstances, there will be some space between packages
+//
+// Each sample gives one delivery rate: bytes carried, divided by how much
+// longer the round trip took than the fastest round trip ever seen. The
+// estimate is the largest of those, not their aggregate.
+//
+// Taking the aggregate is what a first version did, and it fails badly
+// against a real viewer. The round-trip time here is not transmission time:
+// it also contains however long the client took to decode the frame and get
+// round to acknowledging it, and a viewer answers on its own paint cadence.
+// A 994 byte frame acknowledged after 208 ms was measured against TigerVNC;
+// read as transmission that is 4.8 kB/s, and averaged in with the rest it
+// dragged the estimate for a link that sustains ~590 kB/s down to 83 kB/s.
+// The window then fell below the size of a single frame and the server
+// started throttling itself against a limit it had invented.
+//
+// A small frame acknowledged slowly is evidence of a slow client, not of a
+// slow link, and the useful property of those samples is that they can only
+// ever understate the rate. Taking the maximum therefore ignores them for
+// free: whichever sample got the most bytes through per unit of delay is the
+// closest to a true measurement of the link, and the rest cannot pull it
+// down. This is the max-filtered delivery rate that BBR uses, and the ring
+// buffer bounds how long one good sample stays believed.
 static double estimate_non_congested_bandwidth(const struct bwe* self)
 {
-	int bytes_total = 0;
-	int bw_delay_total = 0;
+	double best = 0;
 
 	for (int i = 0; i < self->n_samples; ++i) {
 		const struct bwe_sample* s = get_sample(self, i);
@@ -48,11 +76,18 @@ static double estimate_non_congested_bandwidth(const struct bwe* self)
 		int rtt = s->arrival_time - s->departure_time;
 		int bw_delay = rtt - self->rtt_min;
 
-		bytes_total += s->bytes;
-		bw_delay_total += bw_delay;
+		// A round trip no slower than the fastest ever seen puts no
+		// measurable time on the wire, so it says nothing about rate.
+		// Skipping it also keeps the division below defined.
+		if (bw_delay <= 0)
+			continue;
+
+		double rate = (double)s->bytes / (bw_delay * 1e-6);
+		if (rate > best)
+			best = rate;
 	}
 
-	return (double)bytes_total / (bw_delay_total * 1e-6);
+	return best;
 }
 
 // Under congested circumstances, there will be no space between packages
@@ -73,6 +108,9 @@ static double estimate_congested_bandwidth(const struct bwe* self)
 
 	int rtt = s1->arrival_time - s0->departure_time;
 	int bw_delay = rtt - self->rtt_min;
+
+	if (bw_delay <= 0)
+		return 0;
 
 	return (double)bytes_total / (bw_delay * 1e-6);
 }

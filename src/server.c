@@ -2468,7 +2468,11 @@ static void on_connection(struct aml_handler* poll_handle)
 	client->quality = 10; /* default to lossless */
 	client->led_state = -1; /* trigger sending of initial state */
 	client->min_rtt = INT32_MAX;
-	client->bwe = bwe_create(INT32_MAX);
+	// Zero, not INT32_MAX: bwe subtracts this from every round trip, so a
+	// large starting value makes every delay negative. client->min_rtt is
+	// a different thing and does start at INT32_MAX, being a minimum that
+	// measurements walk downwards.
+	client->bwe = bwe_create(0);
 	client->compositor = compositor_create();
 
 	/* default extended clipboard capabilities */
