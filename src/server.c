@@ -824,6 +824,24 @@ static void send_ping(struct nvnc_client* client, uint32_t prev_frame_size)
 			payload, sizeof(payload));
 }
 
+/* Default tight quality. RFB clients tell the server what JPEG quality they
+ * will accept via a pseudo-encoding; when a viewer never sends one (the macOS
+ * TigerVNC viewer does not), the server would otherwise stay lossless, which
+ * is ruinous for photographic or full-motion content on a slow link. This
+ * lets the server pick a lossy default: NEATVNC_QUALITY=0..9 forces JPEG at
+ * that quality, anything else (or unset) keeps lossless. A client that does
+ * request a quality still overrides this. */
+static int nvnc__default_quality(void)
+{
+	const char* s = getenv("NEATVNC_QUALITY");
+	if (s) {
+		int q = atoi(s);
+		if (q >= 0 && q <= 9)
+			return q;
+	}
+	return 10; /* lossless */
+}
+
 static int on_client_set_encodings(struct nvnc_client* client)
 {
 	struct rfb_client_set_encodings_msg* msg =
@@ -840,7 +858,7 @@ static int on_client_set_encodings(struct nvnc_client* client)
 	    sizeof(*msg) + n_encodings * 4)
 		return 0;
 
-	client->quality = 10;
+	client->quality = nvnc__default_quality();
 
 	for (size_t i = 0; i < n_encodings && n < MAX_ENCODINGS; ++i) {
 		enum rfb_encodings encoding = htonl(msg->encodings[i]);
@@ -2492,7 +2510,7 @@ static void on_connection(struct aml_handler* poll_handle)
 	weakref_subject_init(&client->weakref);
 
 	client->server = server;
-	client->quality = 10; /* default to lossless */
+	client->quality = nvnc__default_quality();
 	client->led_state = -1; /* trigger sending of initial state */
 	client->min_rtt = INT32_MAX;
 	// Zero, not INT32_MAX: bwe subtracts this from every round trip, so a
