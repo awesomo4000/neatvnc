@@ -8,7 +8,26 @@ workload revisions.
 
     bench/vncbench.py --ab --workload scroll --encoding <enc> --secs 6 --repeat 2
 
-> **These numbers predate fence support in the harness.** They were taken by
+## What fences cost
+
+Measured with `--encoding raw`, the only mode that parses messages exactly
+and can therefore answer a fence request:
+
+| harness | fps | KiB/update |
+|---|---|---|
+| `--no-fence` (congestion control inert) | 8.5 | 106.7 |
+| fences answered | 7.1 | 134.4 |
+
+So the congestion controller costs about 16% here, not the order of
+magnitude a first, broken measurement suggested. That first run advertised
+fences from the quiet-boundary path, which reads undifferentiated bytes and
+cannot answer them; the in-flight byte count grew forever and the server
+throttled itself to a standstill. The harness now refuses that combination
+outright. Note also that this client answers a fence the instant it arrives,
+where a real viewer answers on its own paint cadence -- 208ms for a 1KiB
+frame was observed -- so 16% is a floor, not the figure a viewer sees.
+
+> **The per-encoding table below predates fence support in the harness.** They were taken by
 > a client that did not advertise the `fence` pseudo-encoding, so neatvnc's
 > congestion control never engaged and never dropped a frame. That path is
 > where the real cost turned out to be: against a fence-capable viewer the
