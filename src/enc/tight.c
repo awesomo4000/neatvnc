@@ -46,6 +46,18 @@
 #define TIGHT_BASIC 0x00
 
 #define TIGHT_STREAM(n) ((n) << 4)
+#define TIGHT_FILTER_ID 0x40
+#define TIGHT_FILTER_COPY 0
+#define TIGHT_FILTER_PALETTE 1
+
+/* Below this many bytes the tight spec sends filtered data uncompressed and
+ * without a length prefix. Tiles here are 64x64 and edge tiles on a 1280x800
+ * screen are 64x32, so palette data never gets that small -- but fall back to
+ * plain copy rather than emit something a client would misparse. */
+#define TIGHT_MIN_TO_COMPRESS 12
+
+/* Power of two, comfortably above the 256-colour cap so probing stays short. */
+#define TIGHT_PAL_SLOTS 1024
 #define TIGHT_RESET(n) (1 << (n))
 
 #define TSL 64 /* Tile Side Length */
@@ -78,6 +90,12 @@ struct tight_encoder {
 	struct nvnc_pixel_format dfmt;
 
 	uint8_t tile_buf[4][TSL * TSL * 4];
+
+	/* Palette scratch, per zlib worker. The workers run concurrently on
+	 * disjoint tile columns, so each needs its own. */
+	uint8_t pack_buf[4][TSL * TSL];
+	uint32_t pal_key[4][TIGHT_PAL_SLOTS];
+	int16_t pal_idx[4][TIGHT_PAL_SLOTS];
 	struct nvnc_composite_fb composite_fb;
 
 	uint64_t pts;
@@ -100,6 +118,9 @@ enum tight_tile_state {
 struct tight_tile {
 	enum tight_tile_state state;
 	size_t size;
+	/* Bytes at the start of buffer that are written verbatim and excluded
+	 * from the compressed-length prefix: the filter id and the palette. */
+	size_t hdr_size;
 	uint8_t type;
 	char buffer[MAX_TILE_SIZE];
 };
@@ -318,6 +339,85 @@ static int tight_deflate(struct tight_tile* tile, void* src,
 	return 0;
 }
 
+
+static inline uint32_t tight_px_key(const uint8_t* p, int bpp)
+{
+	uint32_t v = 0;
+	for (int i = 0; i < bpp; ++i)
+		v |= (uint32_t)p[i] << (8 * i);
+	return v;
+}
+
+static inline uint32_t tight_px_slot(uint32_t key)
+{
+	/* Knuth multiplicative; the low bits of a pixel vary least, so mix
+	 * before masking. */
+	return (key * 2654435761u) >> (32 - 10);
+}
+
+/* Collect distinct colours into palette[], returning the count, or 257 if the
+ * tile exceeds 256 colours (in which case the caller falls back to copy).
+ * key/idx are caller-provided scratch so this allocates nothing. */
+static int tight_build_palette(const uint8_t* buf, size_t n_px, int bpp,
+		uint8_t* palette, uint32_t* key, int16_t* idx)
+{
+	memset(idx, 0xff, TIGHT_PAL_SLOTS * sizeof(*idx));
+	int n = 0;
+
+	for (size_t i = 0; i < n_px; ++i) {
+		const uint8_t* px = buf + i * bpp;
+		uint32_t k = tight_px_key(px, bpp);
+		uint32_t s = tight_px_slot(k);
+
+		for (;;) {
+			if (idx[s] < 0) {
+				if (n == 256)
+					return 257;
+				key[s] = k;
+				idx[s] = n;
+				memcpy(palette + (size_t)n * bpp, px, bpp);
+				++n;
+				break;
+			}
+			if (key[s] == k)
+				break;
+			s = (s + 1) & (TIGHT_PAL_SLOTS - 1);
+		}
+	}
+
+	return n;
+}
+
+/* Two colours: one bit per pixel, rows padded to a byte boundary. Bit set
+ * means palette entry 1. */
+static void tight_pack_mono(const uint8_t* buf, uint8_t* out, uint32_t width,
+		uint32_t height, int bpp, const uint8_t* palette)
+{
+	size_t stride = (width + 7) / 8;
+	memset(out, 0, stride * height);
+
+	for (uint32_t y = 0; y < height; ++y) {
+		const uint8_t* row = buf + (size_t)y * width * bpp;
+		uint8_t* orow = out + (size_t)y * stride;
+		for (uint32_t x = 0; x < width; ++x)
+			if (memcmp(row + (size_t)x * bpp, palette + bpp, bpp) == 0)
+				orow[x >> 3] |= 0x80 >> (x & 7);
+	}
+}
+
+/* Three to 256 colours: one byte per pixel. */
+static void tight_pack_indexed(const uint8_t* buf, uint8_t* out, size_t n_px,
+		int bpp, const uint32_t* key, const int16_t* idx)
+{
+	for (size_t i = 0; i < n_px; ++i) {
+		uint32_t k = tight_px_key(buf + i * bpp, bpp);
+		uint32_t s = tight_px_slot(k);
+		while (key[s] != k)
+			s = (s + 1) & (TIGHT_PAL_SLOTS - 1);
+		out[i] = (uint8_t)idx[s];
+	}
+}
+
 static void tight_encode_tile_basic(struct tight_encoder* self,
 		struct tight_tile* tile, int fb_index, uint32_t x,
 		uint32_t y, uint32_t width, uint32_t height, int zs_index)
@@ -370,9 +470,60 @@ static void tight_encode_tile_basic(struct tight_encoder* self,
 	if (is_solid) {
 		tile->type = TIGHT_FILL;
 		tile->size = bytes_per_cpixel;
+		tile->hdr_size = 0;
 		memcpy(tile->buffer, buf, bytes_per_cpixel);
 		return;
 	}
+
+	/* Palette: the encoding that actually matters for terminal text.
+	 *
+	 * Two colours pack to 1 bit per pixel and anything up to 256 packs to
+	 * 8, against the 24 that basic:copy sends. zlib helps either way, but
+	 * it cannot recover the factor of 24 that is thrown away by sending
+	 * full pixels in the first place. TigerVNC does this and neatvnc did
+	 * not, which is most of why the same screen cost 92,710 bytes here
+	 * against 5,922 there.
+	 *
+	 * Colours are collected through an open-addressed table rather than a
+	 * linear scan: a linear scan is O(pixels * colours), which at 4096
+	 * pixels and 256 colours is a million comparisons per tile. */
+	uint8_t palette[256 * 4];
+	int n_colors = tight_build_palette(buf, n_px, bytes_per_cpixel,
+			palette, self->pal_key[zs_index],
+			self->pal_idx[zs_index]);
+
+	if (n_colors >= 2 && n_colors <= 256) {
+		size_t data_len = (n_colors == 2)
+			? (size_t)((width + 7) / 8) * height
+			: n_px;
+
+		if (data_len >= TIGHT_MIN_TO_COMPRESS) {
+			uint8_t* packed = self->pack_buf[zs_index];
+			if (n_colors == 2)
+				tight_pack_mono(buf, packed, width, height,
+						bytes_per_cpixel, palette);
+			else
+				tight_pack_indexed(buf, packed, n_px,
+						bytes_per_cpixel,
+						self->pal_key[zs_index],
+						self->pal_idx[zs_index]);
+
+			tile->type = TIGHT_BASIC | TIGHT_STREAM(zs_index) |
+					TIGHT_FILTER_ID;
+			tile->buffer[0] = TIGHT_FILTER_PALETTE;
+			tile->buffer[1] = (uint8_t)(n_colors - 1);
+			memcpy(tile->buffer + 2, palette,
+					(size_t)n_colors * bytes_per_cpixel);
+			tile->hdr_size = 2 + (size_t)n_colors * bytes_per_cpixel;
+			tile->size = tile->hdr_size;
+
+			if (tight_deflate(tile, packed, data_len, zs, true) < 0)
+				abort();
+			return;
+		}
+	}
+
+	tile->hdr_size = 0;
 
 	// TODO: What to do if the buffer fills up?
 	if (tight_deflate(tile, buf, bytes_per_cpixel * width * height,
@@ -555,12 +706,18 @@ static void tight_finish_tile(struct tight_encoder* self,
 
 	vec_append(&self->dst, &tile->type, sizeof(tile->type));
 
-	/* A fill tile carries a single bare TPIXEL: no compressed-length
-	 * prefix and nothing deflated. Every other type is length-prefixed. */
-	if (tile->type != TIGHT_FILL)
-		tight_encode_size(&self->dst, tile->size);
-
-	vec_append(&self->dst, tile->buffer, tile->size);
+	if (tile->type == TIGHT_FILL) {
+		/* A bare TPIXEL: no length prefix, nothing deflated. */
+		vec_append(&self->dst, tile->buffer, tile->size);
+	} else {
+		/* Any filter id and palette go out verbatim ahead of the
+		 * length, which covers only the compressed remainder. */
+		if (tile->hdr_size)
+			vec_append(&self->dst, tile->buffer, tile->hdr_size);
+		tight_encode_size(&self->dst, tile->size - tile->hdr_size);
+		vec_append(&self->dst, tile->buffer + tile->hdr_size,
+				tile->size - tile->hdr_size);
+	}
 
 	tile->state = TIGHT_TILE_READY;
 }
