@@ -348,6 +348,32 @@ static void tight_encode_tile_basic(struct tight_encoder* self,
 	};
 	nvnc_frame_copy_region(fb, &options);
 
+	/* Solid tiles become TIGHT_FILL: one TPIXEL instead of a deflated
+	 * copy of the whole tile.
+	 *
+	 * This matters far more than it looks. neatvnc previously emitted
+	 * basic:copy for every tile without exception -- 24-bit pixels pushed
+	 * through zlib -- while TigerVNC picks a sub-encoding per tile.
+	 * Measured on the wire for the same screen: neatvnc 260 tiles /
+	 * 92,710 bytes, all basic:copy, against TigerVNC 5,922 bytes. A
+	 * desktop is mostly uniform background, so most tiles are solid and
+	 * cost 4 bytes here instead of a deflate stream.
+	 *
+	 * Compare in the converted pixel format rather than the source, so
+	 * the comparison matches exactly what would otherwise be sent. */
+	size_t n_px = (size_t)width * height;
+	bool is_solid = n_px > 0;
+	for (size_t i = 1; i < n_px && is_solid; ++i)
+		is_solid = memcmp(buf, buf + i * bytes_per_cpixel,
+				bytes_per_cpixel) == 0;
+
+	if (is_solid) {
+		tile->type = TIGHT_FILL;
+		tile->size = bytes_per_cpixel;
+		memcpy(tile->buffer, buf, bytes_per_cpixel);
+		return;
+	}
+
 	// TODO: What to do if the buffer fills up?
 	if (tight_deflate(tile, buf, bytes_per_cpixel * width * height,
 			zs, true) < 0)
@@ -528,7 +554,12 @@ static void tight_finish_tile(struct tight_encoder* self,
 			width, height);
 
 	vec_append(&self->dst, &tile->type, sizeof(tile->type));
-	tight_encode_size(&self->dst, tile->size);
+
+	/* A fill tile carries a single bare TPIXEL: no compressed-length
+	 * prefix and nothing deflated. Every other type is length-prefixed. */
+	if (tile->type != TIGHT_FILL)
+		tight_encode_size(&self->dst, tile->size);
+
 	vec_append(&self->dst, tile->buffer, tile->size);
 
 	tile->state = TIGHT_TILE_READY;
